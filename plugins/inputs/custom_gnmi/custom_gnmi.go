@@ -138,7 +138,6 @@ func parseFlexiblePath(pathStr string) (*gnmi.Path, error) {
 			gnmiPath.Elem = append(gnmiPath.Elem, elem)
 		}
 	}
-
 	return gnmiPath, nil
 }
 
