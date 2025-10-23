@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -395,12 +396,71 @@ func (c *GNMI) newSubscribeRequest() (*gnmi.SubscribeRequest, error) {
 	}, nil
 }
 
+// Removed unsupported chars from keys in gnmiPath
+func simplifyKeys(input string) (string, map[string]map[string]string) {
+	// Trova tutte le occorrenze tipo "object[condizioni]"
+	re := regexp.MustCompile(`([\w-]+)\[([^\]]+)\]`)
+	matches := re.FindAllStringSubmatch(input, -1)
+	replacements := make(map[string]map[string]string)
+	output := input
+	for _, m := range matches {
+		object := m[1]
+		content := m[2]
+		conditions := strings.Split(content, ",")
+		newConds := make([]string, 0, len(conditions))
+		for _, cond := range conditions {
+			cond = strings.TrimSpace(cond)
+			if cond == "" {
+				continue
+			}
+			parts := strings.SplitN(cond, "=", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key, value := parts[0], parts[1]
+			if strings.Contains(key, "/") {
+				keyParts := strings.Split(key, "/")
+				shortKey := keyParts[len(keyParts)-1]
+				if _, ok := replacements[object]; !ok {
+					replacements[object] = make(map[string]string)
+				}
+				replacements[object][shortKey] = key
+				newConds = append(newConds, fmt.Sprintf("%s=%s", shortKey, value))
+			} else {
+				newConds = append(newConds, cond)
+			}
+		}
+		old := fmt.Sprintf("%s[%s]", object, content)
+		new := fmt.Sprintf("%s[%s]", object, strings.Join(newConds, ","))
+		output = strings.Replace(output, old, new, 1)
+	}
+	return output, replacements
+}
+
+// Restore unsupported chars in gnmiPath
+func restoreKeys(gnmiPathElems []*gnmi.PathElem, mapping map[string]map[string]string) []*gnmi.PathElem {
+	for i := range gnmiPathElems {
+		gnmiPathElem, ok := mapping[gnmiPathElems[i].GetName()]
+		if ok {
+			res := gnmiPathElems[i].GetKey()
+			def := map[string]string{}
+			for j := range res {
+				def[gnmiPathElem[j]] = res[j]
+			}
+			gnmiPathElems[i].Key = def
+		}
+	}
+	return gnmiPathElems
+}
+
 // ParsePath from XPath-like string to gNMI path structure
 func parsePath(origin, pathToParse, target string) (*gnmi.Path, error) {
+	pathToParse, mapping := simplifyKeys(pathToParse)
 	gnmiPath, err := xpath.ToGNMIPath(pathToParse)
 	if err != nil {
 		return nil, err
 	}
+	gnmiPath.Elem = restoreKeys(gnmiPath.GetElem(), mapping)
 	gnmiPath.Origin = origin
 	gnmiPath.Target = target
 	return gnmiPath, err
@@ -408,9 +468,12 @@ func parsePath(origin, pathToParse, target string) (*gnmi.Path, error) {
 
 func (s *subscription) buildFullPath(c *GNMI) error {
 	var err error
+	str, mapping := simplifyKeys(s.Path)
+	s.Path = str
 	if s.fullPath, err = xpath.ToGNMIPath(s.Path); err != nil {
 		return err
 	}
+	s.fullPath.Elem = restoreKeys(s.fullPath.Elem, mapping)
 	s.fullPath.Origin = s.Origin
 	s.fullPath.Target = c.Target
 	if c.Prefix != "" {
